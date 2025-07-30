@@ -210,7 +210,7 @@ def main():
     
     # 4. Load model
     print("Loading Qwen 2.5 Math 1.5B model...")
-    llm = LLM(model="Qwen/Qwen2.5-Math-1.5B")
+    llm = LLM(model="Qwen/Qwen2.5-Math-1.5B", dtype="bfloat16", enable_prefix_caching=True, gpu_memory_utilization=0.85)
     
     # 5. Use evaluate_vllm function for evaluation
     print("Evaluating model using evaluate_vllm function...")
@@ -376,5 +376,5 @@ def analyze_generation_categories(results_file: str = "gsm8k_zero_shot_results.j
     return analysis_results
 
 if __name__ == "__main__":
-    # main()
+    main()
     analyze_generation_categories()
