@@ -19,7 +19,7 @@ import queue
 import time
 import math
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
-from math_baseline import (
+from cs336_alignment.math_baseline import (
     format_prompt_with_r1_zero, 
     load_gsm8k_data,
     extract_answer_from_response,
