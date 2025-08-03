@@ -375,6 +375,7 @@ def grpo_train_loop(
             min_tokens=sampling_min_tokens,
             max_tokens=sampling_max_tokens,
             stop=['</answer>'],
+            include_stop_str_in_output=True,
             n=group_size  # Generate n responses per prompt
         )
         
@@ -469,7 +470,7 @@ def grpo_train_loop(
                 optimizer, 
                 step, 
                 total_training_steps, 
-                learning_rate, 
+                0.0, 
                 warmup_steps
             )
             

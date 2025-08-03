@@ -416,9 +416,9 @@ def evaluate_model(model, tokenizer, eval_data, device, vllm_model):
         temperature=1.0,
         top_p=1.0,
         max_tokens=1024,
-        stop=["</answer>"]  # Stop when the model completes its answer
+        stop=["</answer>"],  # Stop when the model completes its answer
+        include_stop_str_in_output=True,
     )
-    sampling_params.include_stop_str_in_output = True
     
     # Generate responses using vLLM
     outputs = vllm_model.generate(prompts, sampling_params)
