@@ -6,8 +6,9 @@ from tqdm import tqdm
 import numpy as np
 import random
 import os
-import threading
-import queue
+import csv
+from datetime import datetime
+
 from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
 from unittest.mock import patch
@@ -28,6 +29,38 @@ from cs336_alignment.math_sft import (
     adjust_learning_rate,
 )
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
+
+class CSVLogger:
+    """CSV logger for training and validation metrics"""
+    
+    def __init__(self, train_csv_path, val_csv_path):
+        self.train_csv_path = train_csv_path
+        self.val_csv_path = val_csv_path
+        
+        # Initialize training CSV
+        with open(self.train_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['step', 'train_reward', 'train_format_reward', 'train_answer_reward', 
+                           'train_loss', 'gradient_norm', 'token_entropy', 'clip_fraction', 'learning_rate'])
+        
+        # Initialize validation CSV
+        with open(self.val_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['step', 'val_reward', 'val_format_reward', 'val_answer_reward'])
+    
+    def log_train_step(self, step, train_reward, train_format_reward, train_answer_reward, 
+                      train_loss, gradient_norm, token_entropy, clip_fraction, learning_rate):
+        """Log training metrics for each step"""
+        with open(self.train_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([step, train_reward, train_format_reward, train_answer_reward,
+                           train_loss, gradient_norm, token_entropy, clip_fraction, learning_rate])
+    
+    def log_val_step(self, step, val_reward, val_format_reward, val_answer_reward):
+        """Log validation metrics after evaluation"""
+        with open(self.val_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([step, val_reward, val_format_reward, val_answer_reward])
 
 def compute_group_normalized_rewards(
     reward_fn: Callable[[str, str], dict[str, float]],
@@ -165,25 +198,9 @@ class DataSampler:
         
         return batch_prompts, batch_ground_truths
 
-def evaluate_model_grpo(model, tokenizer, eval_data, device, vllm_model):
+def evaluate_model_grpo(model, tokenizer, eval_prompts, eval_ground_truths, device, vllm_model):
     """Evaluate model performance using vLLM on separate GPU for GRPO"""
-    
-    # Prepare evaluation data
-    prompts = []
-    ground_truths = []
-    
-    for item in eval_data:
-        question = item['question']
-        ground_truth = item['answer']
-        
-        # Format prompt
-        prompt = format_prompt_with_r1_zero(question)
-        prompts.append(prompt)
-        # Extract the numeric answer from the ground truth
-        ground_truths.append(extract_answer_from_gsm8k_answer(ground_truth))
-    
-    print(f"Evaluating on {len(eval_data)} validation samples using vLLM...")
-    
+    print(f"Evaluating on {len(eval_prompts)} validation samples using vLLM...")
     # Set sampling parameters for evaluation
     eval_sampling_params = SamplingParams(
         temperature=1.0,
@@ -197,43 +214,11 @@ def evaluate_model_grpo(model, tokenizer, eval_data, device, vllm_model):
     eval_results = evaluate_vllm(
         vllm_model=vllm_model,
         reward_fn=r1_zero_reward_fn,
-        prompts=prompts,
+        prompts=eval_prompts,
         eval_sampling_params=eval_sampling_params,
-        ground_truths=ground_truths
+        ground_truths=eval_ground_truths
     )
-    
     return eval_results
-
-def async_evaluate_model_grpo(model, tokenizer, eval_data, device, vllm_model, eval_queue, eval_step):
-    """Asynchronous evaluation function that runs in a separate thread for GRPO"""
-    try:
-        print(f"Starting GRPO evaluation at step {eval_step}...")
-        eval_results = evaluate_model_grpo(model, tokenizer, eval_data, device, vllm_model)
-        eval_queue.put((eval_step, eval_results))
-        print(f"GRPO evaluation completed at step {eval_step}")
-    except Exception as e:
-        print(f"GRPO evaluation failed at step {eval_step}: {e}")
-        eval_queue.put((eval_step, None))
-
-def process_evaluation_results_grpo(eval_queue, history):
-    """Process evaluation results from queue for GRPO"""
-    try:
-        while not eval_queue.empty():
-            eval_step, eval_results = eval_queue.get_nowait()
-            if eval_results is not None:
-                print(f"Received GRPO evaluation result at step {eval_step}")
-                # Log validation metrics
-                history['val_rewards'].append(eval_results['metrics']['avg_reward'])
-                history['val_format_rewards'].append(eval_results['metrics']['format_accuracy'])
-                history['val_answer_rewards'].append(eval_results['metrics']['accuracy'])
-                
-                print(f"Step {eval_step}: Val Reward: {eval_results['metrics']['avg_reward']:.4f}, "
-                      f"Val Format: {eval_results['metrics']['format_accuracy']:.4f}, "
-                      f"Val Answer: {eval_results['metrics']['accuracy']:.4f}")
-            else:
-                print(f"GRPO evaluation at step {eval_step} failed")
-    except queue.Empty:
-        pass
 
 def grpo_train_loop(
     policy: nn.Module,
@@ -253,7 +238,7 @@ def grpo_train_loop(
     sampling_max_tokens: int = 1024,
     epochs_per_rollout_batch: int = 1,
     train_batch_size: int = 256,
-    gradient_accumulation_steps: int = 128,
+    gradient_accumulation_steps: int = 32,
     loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "reinforce_with_baseline",
     use_std_normalization: bool = True,
     cliprange: float = 0.2,
@@ -309,9 +294,6 @@ def grpo_train_loop(
     )
     
     n_microbatches_per_rollout_batch = rollout_batch_size // micro_train_batch_size
-    
-    # Set random seed
-    set_random_seed(seed)
     
     # Initialize vLLM engine
     print(f"Initializing vLLM engine on {vllm_device}...")
@@ -370,20 +352,19 @@ def grpo_train_loop(
         'learning_rates': [],
     }
     
-    # Initialize evaluation queue and thread
-    eval_queue = queue.Queue()
-    eval_thread = None
-    
+    # Initialize CSV logger
+    train_csv_path = f"training_logs/training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    val_csv_path = f"training_logs/validation_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    os.makedirs("training_logs", exist_ok=True)
+    csv_logger = CSVLogger(train_csv_path, val_csv_path)
+
     # Training loop
+    print('Starting training loop...')
     for step in tqdm(range(n_grpo_steps), desc="GRPO Training"):
         policy.train()
         
         # Get next batch of data using the sampler
         rollout_prompts, rollout_ground_truths = train_sampler.get_batch(n_prompts_per_rollout_batch)
-        
-        # Generate rollouts using vLLM
-        rollout_responses = []
-        repeated_ground_truths = []
         
         # Load current policy weights into vLLM
         load_policy_init_vllm_instance(policy, vllm_engine)
@@ -397,13 +378,13 @@ def grpo_train_loop(
             n=group_size  # Generate n responses per prompt
         )
         
-        outputs = vllm_engine.generate(rollout_prompts, sampling_params)
+        # Generate with progress bar disabled
+        outputs = vllm_engine.generate(rollout_prompts, sampling_params, use_tqdm=False)
         
         # Extract all responses and ground truths
         repeated_rollout_prompts = []
         repeated_rollout_responses = []
         repeated_ground_truths = []
-        
         for i, output in enumerate(outputs):
             # Each output contains n responses for one prompt
             for j in range(group_size):
@@ -418,12 +399,14 @@ def grpo_train_loop(
             r1_zero_reward_fn, repeated_rollout_responses, repeated_ground_truths, 
             group_size, advantage_eps, use_std_normalization
         )
+        advantages = advantages.unsqueeze(-1).to(device)
+        raw_rewards = raw_rewards.unsqueeze(-1).to(device)
 
         # Tokenize rollout data
         tokenized_data = tokenize_prompt_and_output(repeated_rollout_prompts, repeated_rollout_responses, tokenizer)
-        input_ids = tokenized_data['input_ids']
-        labels = tokenized_data['labels']
-        response_mask = tokenized_data['response_mask']
+        input_ids = tokenized_data['input_ids'].to(device)
+        labels = tokenized_data['labels'].to(device)
+        response_mask = tokenized_data['response_mask'].to(device)
         
         # Compute old log probs if using GRPO-Clip (off-policy)
         old_log_probs = None
@@ -521,42 +504,52 @@ def grpo_train_loop(
             
             # Record learning rate
             history['learning_rates'].append(current_lr)
+            
+            # Log training metrics to CSV for each step
+            csv_logger.log_train_step(
+                step,
+                history['train_rewards'][-1],
+                history['train_format_rewards'][-1],
+                history['train_answer_rewards'][-1],
+                history['train_losses'][-1],
+                history['gradient_norms'][-1],
+                history['token_entropies'][-1],
+                history['clip_fractions'][-1],
+                history['learning_rates'][-1]
+            )
         
         # Check if evaluation should be started
-        if step % val_every_n_steps == 0:
-            # If previous evaluation thread is still running, wait for it to complete
-            if eval_thread and eval_thread.is_alive():
-                print(f"Waiting for previous evaluation to complete...")
-                eval_thread.join()
+        if step % val_every_n_steps == 0 or step == n_grpo_steps - 1:
+            print(f"Starting evaluation at step {step}...")
             
             # Load current policy weights into vLLM for evaluation
             load_policy_init_vllm_instance(policy, vllm_engine)
             
-            # Start new evaluation thread
-            eval_thread = threading.Thread(
-                target=async_evaluate_model_grpo,
-                args=(policy, tokenizer, val_data, device, vllm_engine, eval_queue, step)
+            # Perform synchronous evaluation
+            eval_results = evaluate_model_grpo(policy, tokenizer, val_prompts, val_ground_truths, device, vllm_engine)
+            
+            # Log validation metrics
+            history['val_rewards'].append(eval_results['metrics']['avg_reward'])
+            history['val_format_rewards'].append(eval_results['metrics']['format_accuracy'])
+            history['val_answer_rewards'].append(eval_results['metrics']['accuracy'])
+            
+            # Log validation metrics to CSV
+            csv_logger.log_val_step(
+                step,
+                eval_results['metrics']['avg_reward'],
+                eval_results['metrics']['format_accuracy'],
+                eval_results['metrics']['accuracy']
             )
-            eval_thread.daemon = True  # Set as daemon thread
-            eval_thread.start()
-            print(f"Started evaluation thread at step {step}")
-        
-        # Check evaluation results
-        process_evaluation_results_grpo(eval_queue, history)
+            
+            print(f"Step {step}: Val Reward: {eval_results['metrics']['avg_reward']:.4f}, "
+                  f"Val Format: {eval_results['metrics']['format_accuracy']:.4f}, "
+                  f"Val Answer: {eval_results['metrics']['accuracy']:.4f}")
         
         # Print training progress
-        if step % val_every_n_steps == 0:
+        if step % val_every_n_steps == 0 or step == n_grpo_steps - 1:
             print(f"Step {step}: Train Reward: {history['train_rewards'][-1]:.4f}, LR: {current_lr:.2e}")
             if history['val_rewards']:
                 print(f"Step {step}: Val Reward: {history['val_rewards'][-1]:.4f}")
-    
-    # Wait for final evaluation to complete
-    if eval_thread and eval_thread.is_alive():
-        print("Waiting for final evaluation to complete...")
-        eval_thread.join()
-    
-    # Process final evaluation results
-    process_evaluation_results_grpo(eval_queue, history)
     
     return history
 
@@ -590,15 +583,6 @@ def main():
         train_data_path=train_data_path,
         val_data_path=val_data_path,
         model_name=model_name,
-        vllm_device="cuda:1",
-        device=device,
-        n_grpo_steps=50,  # Reduced for demonstration
-        learning_rate=1e-5,
-        rollout_batch_size=64,  # Reduced for demonstration
-        group_size=8,
-        train_batch_size=64,
-        gradient_accumulation_steps=32,
-        val_every_n_steps=5,
     )
     
     print("Training completed!")
