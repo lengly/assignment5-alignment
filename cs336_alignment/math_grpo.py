@@ -292,11 +292,10 @@ def grpo_train_loop(
     )
     n_prompts_per_rollout_batch = rollout_batch_size // group_size
     
-    assert train_batch_size >= group_size, (
-        "train_batch_size must be greater than or equal to group_size"
+    # Ensure train_batch_size is not larger than total data per rollout
+    assert train_batch_size <= epochs_per_rollout_batch * rollout_batch_size, (
+        "train_batch_size must be less than or equal to epochs_per_rollout_batch * rollout_batch_size"
     )
-    
-    n_microbatches_per_rollout_batch = rollout_batch_size // micro_train_batch_size
     
     # Initialize vLLM engine
     print(f"Initializing vLLM engine on {vllm_device}...")
@@ -334,7 +333,12 @@ def grpo_train_loop(
     )
     
     # Calculate total training steps for learning rate scheduling
-    total_training_steps = n_grpo_steps * epochs_per_rollout_batch
+    # epochs_per_rollout_batch * rollout_batch_size is the total data generated per rollout
+    # We process train_batch_size data at a time
+    total_data_per_rollout = epochs_per_rollout_batch * rollout_batch_size
+    n_train_steps_per_rollout_batch = total_data_per_rollout // train_batch_size
+    assert total_data_per_rollout % train_batch_size == 0, "total_data_per_rollout must be divisible by train_batch_size"
+    total_training_steps = n_grpo_steps * n_train_steps_per_rollout_batch
     warmup_steps = int(total_training_steps * 0.05)  # 5% warmup
     
     # Create data sampler for training
@@ -363,6 +367,7 @@ def grpo_train_loop(
 
     # Training loop
     print('Starting training loop...')
+    actual_step = 0
     for step in tqdm(range(n_grpo_steps), desc="GRPO Training"):
         policy.train()
         
@@ -423,24 +428,47 @@ def grpo_train_loop(
                 )['log_probs']
         
         # Multiple epochs per rollout batch (off-policy)
-        for epoch in range(epochs_per_rollout_batch):         
+        for inner_step in range(n_train_steps_per_rollout_batch):
+            actual_step += 1
             # Process in microbatches
             optimizer.zero_grad()
             
             token_entropy_list = []
             loss_batch = 0.0
-            for microbatch_idx in range(n_microbatches_per_rollout_batch):
-                start_idx = microbatch_idx * micro_train_batch_size
-                end_idx = start_idx + micro_train_batch_size
-
-                microbatch_input_ids = input_ids[start_idx:end_idx]
-                microbatch_labels = labels[start_idx:end_idx]
-                microbatch_response_mask = response_mask[start_idx:end_idx]
-                microbatch_advantages = advantages[start_idx:end_idx]
-                microbatch_raw_rewards = raw_rewards[start_idx:end_idx]
+            
+            # Calculate how many microbatches we need for this training step
+            start_data_idx = inner_step * train_batch_size
+            end_data_idx = min(start_data_idx + train_batch_size, total_data_per_rollout)
+            current_batch_size = end_data_idx - start_data_idx
+            
+            # Calculate microbatches for current training step
+            n_microbatches = current_batch_size // micro_train_batch_size
+            if current_batch_size % micro_train_batch_size != 0:
+                n_microbatches += 1
+            
+            for microbatch_idx in range(n_microbatches):
+                microbatch_start = (start_data_idx + microbatch_idx * micro_train_batch_size)
+                microbatch_end = (min(microbatch_start + micro_train_batch_size, end_data_idx))
+                if microbatch_start > rollout_batch_size:
+                    microbatch_start -= rollout_batch_size
+                    microbatch_end -= rollout_batch_size
+                    # shuffle
+                    perm = torch.randperm(input_ids.size(0))
+                    input_ids = input_ids[perm]
+                    labels = labels[perm]
+                    response_mask = response_mask[perm]
+                    advantages = advantages[perm]
+                    raw_rewards = raw_rewards[perm]
+                assert microbatch_start < microbatch_end, "microbatch_start must be less than microbatch_end"
+                
+                microbatch_input_ids = input_ids[microbatch_start:microbatch_end]
+                microbatch_labels = labels[microbatch_start:microbatch_end]
+                microbatch_response_mask = response_mask[microbatch_start:microbatch_end]
+                microbatch_advantages = advantages[microbatch_start:microbatch_end]
+                microbatch_raw_rewards = raw_rewards[microbatch_start:microbatch_end]
                 
                 if old_log_probs is not None:
-                    microbatch_old_log_probs = old_log_probs[start_idx:end_idx]
+                    microbatch_old_log_probs = old_log_probs[microbatch_start:microbatch_end]
                 else:
                     microbatch_old_log_probs = None
                 
@@ -449,6 +477,7 @@ def grpo_train_loop(
                 log_probs = response_log_probs_result['log_probs']
                 token_entropy = response_log_probs_result['token_entropy']
                 token_entropy_list.append(token_entropy.mean().item())
+                
                 # Compute loss
                 loss, loss_info = grpo_microbatch_train_step(
                     log_probs,
@@ -460,7 +489,7 @@ def grpo_train_loop(
                     microbatch_old_log_probs,
                     cliprange
                 )
-                loss_batch += loss.item() / n_microbatches_per_rollout_batch
+                loss_batch += loss.item() / n_microbatches
             
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
@@ -511,7 +540,7 @@ def grpo_train_loop(
             
             # Log training metrics to CSV for each step
             csv_logger.log_train_step(
-                step,
+                actual_step,
                 history['train_rewards'][-1],
                 history['train_format_rewards'][-1],
                 history['train_answer_rewards'][-1],
@@ -523,8 +552,8 @@ def grpo_train_loop(
             )
         
         # Check if evaluation should be started
-        if step % val_every_n_steps == 0 or step == n_grpo_steps - 1:
-            print(f"Starting evaluation at step {step}...")
+        if actual_step % val_every_n_steps == 0 or actual_step == total_training_steps - 1:
+            print(f"Starting evaluation at step {actual_step}...")
             
             # Load current policy weights into vLLM for evaluation
             load_policy_init_vllm_instance(policy, vllm_engine)
@@ -539,21 +568,21 @@ def grpo_train_loop(
             
             # Log validation metrics to CSV
             csv_logger.log_val_step(
-                step,
+                actual_step,
                 eval_results['metrics']['avg_reward'],
                 eval_results['metrics']['format_accuracy'],
                 eval_results['metrics']['accuracy']
             )
             
-            print(f"Step {step}: Val Reward: {eval_results['metrics']['avg_reward']:.4f}, "
+            print(f"Step {actual_step}: Val Reward: {eval_results['metrics']['avg_reward']:.4f}, "
                   f"Val Format: {eval_results['metrics']['format_accuracy']:.4f}, "
                   f"Val Answer: {eval_results['metrics']['accuracy']:.4f}")
         
         # Print training progress
-        if step % val_every_n_steps == 0 or step == n_grpo_steps - 1:
-            print(f"Step {step}: Train Reward: {history['train_rewards'][-1]:.4f}, LR: {current_lr:.2e}")
+        if actual_step % val_every_n_steps == 0 or actual_step == total_training_steps - 1:
+            print(f"Step {actual_step}: Train Reward: {history['train_rewards'][-1]:.4f}, LR: {current_lr:.2e}")
             if history['val_rewards']:
-                print(f"Step {step}: Val Reward: {history['val_rewards'][-1]:.4f}")
+                print(f"Step {actual_step}: Val Reward: {history['val_rewards'][-1]:.4f}")
     
     return history
 
