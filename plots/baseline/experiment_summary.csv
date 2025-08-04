@@ -1,0 +1,3 @@
+﻿Experiment Name,Final Training Reward,Final Training Format Reward,Final Training Answer Reward,Final Validation Reward,Final Validation Format Reward,Final Validation Answer Reward,Max Training Reward,Max Validation Reward,Training Steps,Validation Count
+reinforce_with_baseline,0.53125,0.66015625,0.53125,0.6163760424564063,0.9598180439727066,0.6163760424564063,0.734375,0.6535253980288097,100,11
+no_baseline,0.6953125,0.97265625,0.6953125,0.5579984836997726,0.9757391963608796,0.5579984836997726,0.77734375,0.5898407884761183,100,11
