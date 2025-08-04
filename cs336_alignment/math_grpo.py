@@ -27,6 +27,7 @@ from cs336_alignment.math_sft import (
     tokenize_prompt_and_output,
     get_response_log_probs,
     adjust_learning_rate,
+    masked_normalize,
 )
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 
@@ -160,7 +161,9 @@ def grpo_microbatch_train_step(
     """
     loss, loss_info = compute_policy_gradient_loss(policy_log_probs, loss_type, raw_rewards, advantages, old_log_probs, cliprange)
     loss = masked_mean(loss, response_mask)
+    # loss = masked_mean(loss, response_mask, dim=1)
     loss = loss / gradient_accumulation_steps
+    # loss = loss.mean()
     loss.backward()
     return loss, loss_info
 
@@ -228,8 +231,8 @@ def grpo_train_loop(
     model_name: str = "Qwen/Qwen2.5-Math-1.5B",
     vllm_device: str = "cuda:1",
     device: str = "cuda:0",
-    n_grpo_steps: int = 200,
-    learning_rate: float = 1e-5,
+    n_grpo_steps: int = 100,
+    learning_rate: float = 5e-5,
     advantage_eps: float = 1e-6,
     rollout_batch_size: int = 256,
     group_size: int = 8,
@@ -240,7 +243,7 @@ def grpo_train_loop(
     train_batch_size: int = 256,
     gradient_accumulation_steps: int = 32,
     loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "reinforce_with_baseline",
-    use_std_normalization: bool = True,
+    use_std_normalization: bool = False,
     cliprange: float = 0.2,
     val_every_n_steps: int = 10,
     gpu_memory_utilization: float = 0.85,
@@ -468,9 +471,9 @@ def grpo_train_loop(
             # Adjust learning rate
             current_lr = adjust_learning_rate(
                 optimizer, 
-                step, 
+                step + 1, 
                 total_training_steps, 
-                0.0, 
+                learning_rate, 
                 warmup_steps
             )
             

@@ -55,7 +55,7 @@ def adjust_learning_rate(optimizer, step, total_steps, initial_lr, warmup_steps=
     if step < warmup_steps:
         # Linear warmup: from 0.1 * lr to lr
         warmup_factor = step / warmup_steps
-        current_lr = min_lr + (initial_lr - min_lr) * warmup_factor
+        current_lr = initial_lr * warmup_factor
     else:
         # Cosine decay: from lr to min_lr
         decay_steps = total_steps - warmup_steps
@@ -664,6 +664,7 @@ def train_sft_model(
                         log_probs = response_log_probs['log_probs']
                         loss, _ = sft_microbatch_train_step(log_probs, response_mask, gradient_accumulation_steps)
                         
+                        total_steps += 1
                         # Backward pass
                         if (batch_idx + 1) % gradient_accumulation_steps == 0:
                             # Add gradient clipping to prevent gradient explosion
@@ -681,7 +682,6 @@ def train_sft_model(
                             )
                         
                         epoch_loss += loss.item()
-                        total_steps += 1
                         
                         # Check if evaluation should be started
                         if total_steps % 200 == 0 or total_steps == max_steps - 1:
