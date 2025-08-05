@@ -375,8 +375,8 @@ def plot_grpo_prompt():
          "training_logs/training_log_20250805_075341.csv",
          "training_logs/validation_log_20250805_075341.csv"),
         ("grpo_offpolicy_256_2_512_no_prompt", 
-         "training_logs/training_log_20250805_102832.csv",
-         "training_logs/validation_log_20250805_102832.csv"),
+         "training_logs/training_log_20250805_140202.csv",
+         "training_logs/validation_log_20250805_140202.csv"),
     ]
 
     plotter = GRPOExperimentPlotter(experiments)

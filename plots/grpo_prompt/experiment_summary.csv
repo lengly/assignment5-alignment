@@ -1,0 +1,3 @@
+﻿Experiment Name,Final Training Reward,Final Training Format Reward,Final Training Answer Reward,Final Validation Reward,Final Validation Format Reward,Final Validation Answer Reward,Max Training Reward,Max Validation Reward,Training Steps,Validation Count
+grpo_offpolicy_256_2_512,0.81640625,0.99609375,0.81640625,0.7414708112206216,0.9886277482941622,0.7414708112206216,0.94140625,0.7558756633813495,50,5
+grpo_offpolicy_256_2_512_no_prompt,0.91796875,1.0,0.91796875,0.799090219863533,0.9605761940864292,0.799090219863533,0.96875,0.799090219863533,54,5
