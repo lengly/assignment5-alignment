@@ -239,10 +239,10 @@ def grpo_train_loop(
     sampling_temperature: float = 1.0,
     sampling_min_tokens: int = 4,
     sampling_max_tokens: int = 1024,
-    epochs_per_rollout_batch: int = 1,
-    train_batch_size: int = 256,
-    gradient_accumulation_steps: int = 32,
-    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "reinforce_with_baseline",
+    epochs_per_rollout_batch: int = 2,
+    train_batch_size: int = 512,
+    gradient_accumulation_steps: int = 64,
+    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "grpo_clip",
     use_std_normalization: bool = False,
     cliprange: float = 0.2,
     val_every_n_steps: int = 10,
@@ -340,6 +340,7 @@ def grpo_train_loop(
     assert total_data_per_rollout % train_batch_size == 0, "total_data_per_rollout must be divisible by train_batch_size"
     total_training_steps = n_grpo_steps * n_train_steps_per_rollout_batch
     warmup_steps = int(total_training_steps * 0.05)  # 5% warmup
+    print(f"Total training steps: {total_training_steps}, warmup steps: {warmup_steps}")
     
     # Create data sampler for training
     train_sampler = DataSampler(train_prompts, train_ground_truths)
@@ -420,12 +421,19 @@ def grpo_train_loop(
         # Compute old log probs if using GRPO-Clip (off-policy)
         old_log_probs = None
         if loss_type == "grpo_clip" and epochs_per_rollout_batch > 1:            
-            with torch.no_grad():
-                old_log_probs = get_response_log_probs(
-                    policy, 
-                    input_ids, 
-                    labels
-                )['log_probs']
+            with torch.inference_mode():
+                old_log_probs_list = []
+                for start_idx in range(0, input_ids.size(0), micro_train_batch_size):
+                    end_idx = min(start_idx + micro_train_batch_size, input_ids.size(0))
+                    batch_input_ids = input_ids[start_idx:end_idx]
+                    batch_labels = labels[start_idx:end_idx]
+                    batch_log_probs = get_response_log_probs(
+                        policy, 
+                        batch_input_ids, 
+                        batch_labels
+                    )['log_probs']
+                    old_log_probs_list.append(batch_log_probs)
+                old_log_probs = torch.cat(old_log_probs_list, dim=0)
         
         # Multiple epochs per rollout batch (off-policy)
         for inner_step in range(n_train_steps_per_rollout_batch):
@@ -438,6 +446,18 @@ def grpo_train_loop(
             
             # Calculate how many microbatches we need for this training step
             start_data_idx = inner_step * train_batch_size
+            if start_data_idx >= rollout_batch_size:
+                if start_data_idx % rollout_batch_size == 0:
+                    # shuffle
+                    perm = torch.randperm(input_ids.size(0))
+                    input_ids = input_ids[perm]
+                    labels = labels[perm]
+                    response_mask = response_mask[perm]
+                    advantages = advantages[perm]
+                    raw_rewards = raw_rewards[perm]
+                    reward_infos = [reward_infos[i] for i in perm]
+                    old_log_probs = old_log_probs[perm]
+                start_data_idx = start_data_idx % rollout_batch_size
             end_data_idx = min(start_data_idx + train_batch_size, total_data_per_rollout)
             current_batch_size = end_data_idx - start_data_idx
             
@@ -448,17 +468,19 @@ def grpo_train_loop(
             
             for microbatch_idx in range(n_microbatches):
                 microbatch_start = (start_data_idx + microbatch_idx * micro_train_batch_size)
-                microbatch_end = (min(microbatch_start + micro_train_batch_size, end_data_idx))
-                if microbatch_start > rollout_batch_size:
-                    microbatch_start -= rollout_batch_size
-                    microbatch_end -= rollout_batch_size
-                    # shuffle
-                    perm = torch.randperm(input_ids.size(0))
-                    input_ids = input_ids[perm]
-                    labels = labels[perm]
-                    response_mask = response_mask[perm]
-                    advantages = advantages[perm]
-                    raw_rewards = raw_rewards[perm]
+                if microbatch_start >= rollout_batch_size:
+                    if microbatch_start % rollout_batch_size == 0:
+                        # shuffle
+                        perm = torch.randperm(input_ids.size(0))
+                        input_ids = input_ids[perm]
+                        labels = labels[perm]
+                        response_mask = response_mask[perm]
+                        advantages = advantages[perm]
+                        raw_rewards = raw_rewards[perm]
+                        reward_infos = [reward_infos[i] for i in perm]
+                        old_log_probs = old_log_probs[perm]
+                    microbatch_start = microbatch_start % rollout_batch_size
+                microbatch_end = min(microbatch_start + micro_train_batch_size, end_data_idx)
                 assert microbatch_start < microbatch_end, "microbatch_start must be less than microbatch_end"
                 
                 microbatch_input_ids = input_ids[microbatch_start:microbatch_end]
@@ -466,7 +488,6 @@ def grpo_train_loop(
                 microbatch_response_mask = response_mask[microbatch_start:microbatch_end]
                 microbatch_advantages = advantages[microbatch_start:microbatch_end]
                 microbatch_raw_rewards = raw_rewards[microbatch_start:microbatch_end]
-                
                 if old_log_probs is not None:
                     microbatch_old_log_probs = old_log_probs[microbatch_start:microbatch_end]
                 else:
@@ -494,26 +515,26 @@ def grpo_train_loop(
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
             
-            # Optimizer step
-            optimizer.step()
-            
             # Adjust learning rate
             current_lr = adjust_learning_rate(
                 optimizer, 
-                step + 1, 
+                actual_step, 
                 total_training_steps, 
                 learning_rate, 
                 warmup_steps
             )
             
+            # Optimizer step
+            optimizer.step()
+            
             # Logging
             history['train_losses'].append(loss_batch)
-            history['train_rewards'].append(raw_rewards.mean().item())
+            history['train_rewards'].append(raw_rewards[start_data_idx:end_data_idx].mean().item())
             history['train_format_rewards'].append(
-                np.mean([info['format_reward'] for info in reward_infos])
+                np.mean([info['format_reward'] for info in reward_infos[start_data_idx:end_data_idx]])
             )
             history['train_answer_rewards'].append(
-                np.mean([info['answer_reward'] for info in reward_infos])
+                np.mean([info['answer_reward'] for info in reward_infos[start_data_idx:end_data_idx]])
             )
             
             # Compute gradient norm
