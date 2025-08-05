@@ -340,17 +340,48 @@ def plot_std_normalize():
 
 def plot_grpo():
     experiments = [
-        ("grpo_onpolicy_256_1_256", 
+        # rollout_batch_size, epoch_per_rollout_batch, train_batch_size
+        ("onpolicy_256_1_256", 
          "training_logs/training_log_20250804_062149.csv",
          "training_logs/validation_log_20250804_062149.csv"),
-        ("grpo_offpolicy_256_2_256", 
-         "training_logs/training_log_20250804_065710.csv",
-         "training_logs/validation_log_20250804_065710.csv"),
+        ("grpo_offpolicy_256_2_512", 
+         "training_logs/training_log_20250805_075341.csv",
+         "training_logs/validation_log_20250805_075341.csv"),
+        ("grpo_offpolicy_256_2_265 lr=2e-5", 
+         "training_logs/training_log_20250805_091738.csv",
+         "training_logs/validation_log_20250805_091738.csv"),
     ]
     
     # Create plotter and run
     plotter = GRPOExperimentPlotter(experiments)
     plotter.run_all_plots("plots/grpo_policy")
+
+def plot_grpo_clip():
+    experiments = [
+        ("grpo_offpolicy_256_2_512", 
+         "training_logs/training_log_20250805_075341.csv",
+         "training_logs/validation_log_20250805_075341.csv"),
+        ("grpo_offpolicy_256_2_512_no_clip", 
+         "training_logs/training_log_20250805_100130.csv",
+         "training_logs/validation_log_20250805_100130.csv"),
+    ]
+
+    plotter = GRPOExperimentPlotter(experiments)
+    plotter.run_all_plots("plots/grpo_clip")
+
+def plot_grpo_prompt():
+    experiments = [
+        ("grpo_offpolicy_256_2_512", 
+         "training_logs/training_log_20250805_075341.csv",
+         "training_logs/validation_log_20250805_075341.csv"),
+        ("grpo_offpolicy_256_2_512_no_prompt", 
+         "training_logs/training_log_20250805_102832.csv",
+         "training_logs/validation_log_20250805_102832.csv"),
+    ]
+
+    plotter = GRPOExperimentPlotter(experiments)
+    plotter.run_all_plots("plots/grpo_prompt")
+
 
 def main():
     """Main function - define experiment configuration and run plotting"""
@@ -358,8 +389,9 @@ def main():
     # plot_baseline()
     # plot_normalize()
     # plot_std_normalize()
-    plot_grpo()
-
+    # plot_grpo()
+    # plot_grpo_clip()
+    plot_grpo_prompt()
 
 if __name__ == "__main__":
     main() 

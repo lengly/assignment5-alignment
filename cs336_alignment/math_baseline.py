@@ -102,7 +102,7 @@ def evaluate_vllm(
     if ground_truths:
         # Use r1_zero_reward_fn if ground truths are provided
         for generated_text, ground_truth in zip(generated_texts, ground_truths):
-            reward_result = r1_zero_reward_fn(generated_text, ground_truth, fast=True)
+            reward_result = reward_fn(generated_text, ground_truth, fast=True)
             rewards.append(reward_result["reward"])
             format_rewards.append(reward_result["format_reward"])
             answer_rewards.append(reward_result["answer_reward"])

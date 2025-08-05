@@ -29,7 +29,7 @@ from cs336_alignment.math_sft import (
     adjust_learning_rate,
     masked_normalize,
 )
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
+from cs336_alignment.drgrpo_grader import r1_zero_reward_fn, question_only_reward_fn
 
 class CSVLogger:
     """CSV logger for training and validation metrics"""
@@ -216,7 +216,7 @@ def evaluate_model_grpo(model, tokenizer, eval_prompts, eval_ground_truths, devi
     # Evaluate using the imported evaluate_vllm function
     eval_results = evaluate_vllm(
         vllm_model=vllm_model,
-        reward_fn=r1_zero_reward_fn,
+        reward_fn=question_only_reward_fn,
         prompts=eval_prompts,
         eval_sampling_params=eval_sampling_params,
         ground_truths=eval_ground_truths
@@ -311,7 +311,8 @@ def grpo_train_loop(
     for item in train_data:
         question = item['question']
         answer = item['answer']
-        train_prompts.append(format_prompt_with_r1_zero(question))
+        # train_prompts.append(format_prompt_with_r1_zero(question))
+        train_prompts.append(question)
         train_ground_truths.append(extract_answer_from_gsm8k_answer(answer))
     
     # Load validation data
@@ -321,7 +322,8 @@ def grpo_train_loop(
     for item in val_data:
         question = item['question']
         answer = item['answer']
-        val_prompts.append(format_prompt_with_r1_zero(question))
+        # val_prompts.append(format_prompt_with_r1_zero(question))
+        val_prompts.append(question)
         val_ground_truths.append(extract_answer_from_gsm8k_answer(answer))
     
     # Setup optimizer
@@ -406,7 +408,7 @@ def grpo_train_loop(
 
         # Compute rewards and advantages
         advantages, raw_rewards, reward_infos = compute_group_normalized_rewards(
-            r1_zero_reward_fn, repeated_rollout_responses, repeated_ground_truths, 
+            question_only_reward_fn, repeated_rollout_responses, repeated_ground_truths, 
             group_size, advantage_eps, use_std_normalization
         )
         advantages = advantages.unsqueeze(-1).to(device)
